@@ -1,6 +1,35 @@
 """
-Hardware capacity detection and LLM model recommendation utility.
-Supports NVIDIA CUDA, Apple MPS, and CPU-only configurations.
+LLM Model Selection Tool
+========================
+Hardware capacity detection and model recommendation utility.
+
+Author: Antigravity
+Created: 2026-01-21
+Version: 1.0
+Last Modified: 2026-01-21
+
+Description:
+    Detects available hardware (NVIDIA CUDA, Apple MPS, or CPU) and recommends
+    appropriate LLM models for local deployment based on VRAM/memory capacity.
+    Generates a beautiful HTML report with detailed recommendations.
+
+Dependencies:
+    - torch>=2.0.0
+    - psutil>=5.9.0
+
+Usage:
+    python ll_model_selection.py
+
+Output:
+    - Console output with hardware analysis
+    - hardware_report.html (auto-opens in browser)
+
+Version History:
+----------------
+v1.0 (2026-01-21) - Initial release
+    - Hardware detection for CUDA, MPS, CPU
+    - Model recommendations based on VRAM
+    - HTML report generation
 """
 import torch
 import psutil
@@ -15,6 +44,12 @@ MPS_USABLE_MEMORY_RATIO = 0.75  # Conservative estimate for macOS unified memory
 CPU_USABLE_MEMORY_RATIO = 0.5   # Half of RAM for CPU inference
 CONTEXT_OVERHEAD_GB = 2.0        # Memory overhead for context/KV cache
 QUANT_4BIT_GB_PER_BILLION = 0.75 # VRAM per billion parameters (4-bit quantization)
+
+# VRAM Tiers
+VRAM_TIER_ENTERPRISE = 48.0
+VRAM_TIER_PROFESSIONAL = 24.0
+VRAM_TIER_ADVANCED = 16.0
+VRAM_TIER_STANDARD = 8.0
 
 def get_hardware_capacity() -> Tuple[float, str, float, str, List[Dict]]:
     """
@@ -50,8 +85,12 @@ def get_hardware_capacity() -> Tuple[float, str, float, str, List[Dict]]:
                 print(f"  - GPU {i}: {props.name} | {v_mem:.2f} GB VRAM")
                 gpu_details.append({'name': props.name, 'vram': v_mem})
                 vram_gb += v_mem
-    except Exception as e:
+    except (RuntimeError, AttributeError) as e:
         print(f"  Warning: CUDA detection failed: {e}")
+    except ImportError:
+        print("  Warning: CUDA not available (PyTorch built without CUDA support)")
+    except Exception as e:
+        print(f"  Warning: Unexpected error during CUDA detection: {e}")
             
     # 2. Check Apple Silicon (Mac)
     if vram_gb == 0:  # Only check if CUDA wasn't found
@@ -63,8 +102,10 @@ def get_hardware_capacity() -> Tuple[float, str, float, str, List[Dict]]:
                 vram_gb = ram_gb * MPS_USABLE_MEMORY_RATIO
                 print(f"* Backend: Apple Metal Performance Shaders (MPS)")
                 print(f"* Unified Memory: {ram_gb:.2f} GB (Est. Usable for AI: {vram_gb:.2f} GB)")
-        except Exception as e:
+        except (RuntimeError, AttributeError) as e:
             print(f"  Warning: MPS detection failed: {e}")
+        except Exception as e:
+            print(f"  Warning: Unexpected error during MPS detection: {e}")
         
     # 3. Fallback to CPU
     if vram_gb == 0:
@@ -91,10 +132,13 @@ def recommend_models(vram_gb: float, device_type: str) -> Tuple[int, List[Tuple[
     # Rule of Thumb (4-bit quant): ~0.7-0.8 GB VRAM per 1 Billion Parameters + Context overhead
     # Formula: Max_Params = (VRAM - Context_Overhead) / GB_per_Billion
     
-    if vram_gb < 4:
-        max_params = 2
-    else:
+    if QUANT_4BIT_GB_PER_BILLION > 0:
         max_params = (vram_gb - CONTEXT_OVERHEAD_GB) / QUANT_4BIT_GB_PER_BILLION
+    else:
+        max_params = 0
+
+    if max_params < 2: 
+        max_params = 2
 
     print(f"\n### Feasible Local Deployment (4-bit Quantization) ###")
     print(f"* Effective VRAM Cap: {vram_gb:.2f} GB")
@@ -102,26 +146,26 @@ def recommend_models(vram_gb: float, device_type: str) -> Tuple[int, List[Tuple[
     
     models = []
     print("\nRecommended Models (4-bit Quantization):")
-    if vram_gb >= 48:
+    if vram_gb >= VRAM_TIER_ENTERPRISE:
         models = [
             ("Llama-3.1-70B / Llama-3.3-70B", "High performance flagship models"),
             ("Qwen2.5-72B", "Excellent reasoning and multilingual capabilities"),
             ("Mixtral 8x7B", "Mixture of Experts architecture for efficiency")
         ]
-    elif vram_gb >= 24:
+    elif vram_gb >= VRAM_TIER_PROFESSIONAL:
         models = [
             ("Llama-3.1-70B", "Heavily quantized, may be slower but very capable"),
             ("Mixtral 8x7B", "Comfortable fit with good performance"),
             ("Command R (35B)", "Optimized for RAG and tool use"),
             ("Qwen2.5-32B", "Strong reasoning with multilingual support")
         ]
-    elif vram_gb >= 16:
+    elif vram_gb >= VRAM_TIER_ADVANCED:
         models = [
             ("Llama-3.1-13B / Llama-2-13B", "Balanced performance and efficiency"),
             ("Mistral-7B", "Quantized with plenty of headroom"),
             ("Qwen2.5-14B", "Strong performance in this tier")
         ]
-    elif vram_gb >= 8:
+    elif vram_gb >= VRAM_TIER_STANDARD:
         models = [
             ("Llama-3.1-8B", "Gold standard for consumer hardware"),
             ("Mistral-7B", "Excellent general-purpose model"),
@@ -144,7 +188,13 @@ def recommend_models(vram_gb: float, device_type: str) -> Tuple[int, List[Tuple[
     
     return int(max_params), models
 
-if __name__ == "__main__":
+def main(output_path: str = "hardware_report.html"):
+    """
+    Main execution function.
+    
+    Args:
+        output_path (str): Path to save the HTML report.
+    """
     # Get hardware information
     vram_gb, device_type, ram_gb, system, gpu_details = get_hardware_capacity()
     
@@ -163,11 +213,18 @@ if __name__ == "__main__":
     )
     
     # Save report to file
-    output_path = Path("hardware_report.html")
-    output_path.write_text(html_content, encoding='utf-8')
-    
-    print(f"\n✅ HTML report generated: {output_path.absolute()}")
-    print("   Opening in browser...")
-    
-    # Open in default browser
-    webbrowser.open(f"file://{output_path.absolute()}")
+    out_file = Path(output_path)
+    try:
+        out_file.write_text(html_content, encoding='utf-8')
+        print(f"\n✅ HTML report generated: {out_file.absolute()}")
+        print("   Opening in browser...")
+        
+        # Open in default browser
+        webbrowser.open(f"file://{out_file.absolute()}")
+    except IOError as e:
+        print(f"\n❌ Error saving report: {e}")
+    except Exception as e:
+        print(f"\n❌ Unexpected error: {e}")
+
+if __name__ == "__main__":
+    main()
